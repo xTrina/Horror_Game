@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Storage Nightmare</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="loadingScreen">LOADING...</div>
+  <canvas id="gameCanvas"></canvas>
+
+  <script src="js/config.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/player.js"></script>
+  <script src="js/monsters.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/game.js"></script>
+
+  <script>
+    // Hide loading screen once game boots
+    window.addEventListener('DOMContentLoaded', () => {
+      setTimeout(() => {
+        const ls = document.getElementById('loadingScreen');
+        if (ls) ls.classList.add('hidden');
+      }, 300);
+    });
+  </script>
+</body>
+</html>
