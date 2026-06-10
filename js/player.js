@@ -1,18 +1,18 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
-import { CFG, TILE_TYPE as TT } from './config.js';
+import { CFG } from './config.js';
 
-const T  = CFG.TILE;
-const WH = CFG.WALL_H;
+const T = CFG.TILE;
 
 export class Player {
-  constructor(camera, renderer, mapData) {
-    this.camera   = camera;
-    this.mapData  = mapData;
-    this.controls = new PointerLockControls(camera, renderer.domElement);
+  constructor(camera, domElement, mapData) {
+    this.camera  = camera;
+    this.mapData = mapData;
 
-    this.pos = new THREE.Vector3();
-    this.vel = new THREE.Vector2(); // XZ velocity
+    // PointerLockControls: getObject() = yaw-wrapper (world pos)
+    this.controls = new PointerLockControls(camera, domElement);
+    this._yaw     = this.controls.getObject(); // moves in world space
+    this._yaw.position.y = CFG.PLAYER_H;
 
     // Inventory
     this.keycards  = new Set();
@@ -30,142 +30,145 @@ export class Player {
     this.hitCooldown = 0;
     this.swingFrame  = 0;
 
-    this.keys = {};
-    this._bindKeys();
-  }
+    // Bob state
+    this._bobT    = 0;
+    this._lastBob = 0;
+    this._isMoving = false;
 
-  _bindKeys() {
+    this.keys = {};
     window.addEventListener('keydown', e => { this.keys[e.code] = true; });
     window.addEventListener('keyup',   e => { this.keys[e.code] = false; });
   }
+
+  // World position shortcut
+  get pos() { return this._yaw.position; }
 
   get tileCol() { return Math.floor(this.pos.x / T); }
   get tileRow() { return Math.floor(this.pos.z / T); }
   get keycardCount() { return this.keycards.size; }
   get canEscape()    { return this.keycards.size >= CFG.KEYCARD_PIECES; }
 
+  // Add yaw object to scene (call once after init)
+  addToScene(scene) { scene.add(this._yaw); }
+
   setPosition(worldX, worldZ) {
-    this.pos.set(worldX, CFG.PLAYER_H, worldZ);
-    this.camera.position.copy(this.pos);
+    this._yaw.position.set(worldX, CFG.PLAYER_H, worldZ);
   }
 
   update(dt, audio) {
     if (this.dead || this.escaped) return;
-    if (this.swingFrame > 0) { this.swingFrame -= dt * 60; }
-    if (this.hitCooldown > 0) { this.hitCooldown -= dt; }
+    if (this.swingFrame  > 0) this.swingFrame  -= dt * 60;
+    if (this.hitCooldown > 0) this.hitCooldown -= dt;
 
-    const sprinting = (this.keys['ShiftLeft'] || this.keys['ShiftRight']);
+    const sprinting = this.keys['ShiftLeft'] || this.keys['ShiftRight'];
     const spd = sprinting ? CFG.SPRINT_SPD : CFG.WALK_SPD;
 
-    // Movement input
-    const fwd  = new THREE.Vector3();
+    // Camera world direction (flattened to XZ)
+    const fwd   = new THREE.Vector3();
     const right = new THREE.Vector3();
     this.camera.getWorldDirection(fwd);
     fwd.y = 0; fwd.normalize();
     right.crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
 
-    let moveX = 0, moveZ = 0;
-    if (this.keys['KeyW'] || this.keys['ArrowUp'])    { moveX += fwd.x; moveZ += fwd.z; }
-    if (this.keys['KeyS'] || this.keys['ArrowDown'])  { moveX -= fwd.x; moveZ -= fwd.z; }
-    if (this.keys['KeyA'] || this.keys['ArrowLeft'])  { moveX -= right.x; moveZ -= right.z; }
-    if (this.keys['KeyD'] || this.keys['ArrowRight']) { moveX += right.x; moveZ += right.z; }
+    let mx = 0, mz = 0;
+    if (this.keys['KeyW'] || this.keys['ArrowUp'])    { mx += fwd.x;   mz += fwd.z; }
+    if (this.keys['KeyS'] || this.keys['ArrowDown'])  { mx -= fwd.x;   mz -= fwd.z; }
+    if (this.keys['KeyA'] || this.keys['ArrowLeft'])  { mx -= right.x; mz -= right.z; }
+    if (this.keys['KeyD'] || this.keys['ArrowRight']) { mx += right.x; mz += right.z; }
 
-    const len = Math.hypot(moveX, moveZ);
-    if (len > 0) { moveX /= len; moveZ /= len; }
+    const len = Math.hypot(mx, mz);
+    this._isMoving = len > 0;
+    if (len > 0) { mx /= len; mz /= len; }
 
-    const dx = moveX * spd * dt;
-    const dz = moveZ * spd * dt;
-
-    // Resolve collisions on each axis separately
+    const dx = mx * spd * dt;
+    const dz = mz * spd * dt;
     this._moveAxis('x', dx);
     this._moveAxis('z', dz);
 
-    // Footstep noise
-    if (len > 0) {
-      this._stepTimer = (this._stepTimer || 0) + dt;
-      const interval = sprinting ? 0.22 : 0.40;
-      if (this._stepTimer >= interval) {
-        this._stepTimer = 0;
+    // ── Head bob ──────────────────────────────────────────
+    if (this._isMoving) {
+      const bobSpd = sprinting ? 14 : 9;
+      this._bobT += dt * bobSpd;
+
+      const bobY = Math.sin(this._bobT) * (sprinting ? 0.10 : 0.055);
+      const bobX = Math.sin(this._bobT * 0.5) * 0.028;
+
+      this._yaw.position.y = CFG.PLAYER_H + bobY;
+      // Small side-sway on the camera itself (local)
+      this.camera.position.x = bobX;
+
+      // Trigger footstep at each downward crossing of the bob
+      const bobNow = Math.sin(this._bobT);
+      if (this._lastBob >= 0 && bobNow < 0) {
         this.noise = sprinting ? 7 : 3;
         audio.playStep(sprinting);
       }
+      this._lastBob = bobNow;
+    } else {
+      // Smoothly return to neutral
+      this._yaw.position.y += (CFG.PLAYER_H - this._yaw.position.y) * Math.min(1, dt * 10);
+      this.camera.position.x *= (1 - Math.min(1, dt * 10));
     }
+
     this.noise = Math.max(0, this.noise - dt * 2);
-
-    // Storage check
     this.inStorage = this.mapData.isStorage(this.tileCol, this.tileRow);
-
-    // Camera follows pos
-    this.camera.position.copy(this.pos);
   }
 
   _moveAxis(axis, delta) {
-    const map = this.mapData;
     const newPos = this.pos.clone();
     newPos[axis] += delta;
 
-    const r = 0.3; // player radius
+    const r  = 0.28;
     const cx = newPos.x, cz = newPos.z;
     const corners = [
       { x: cx - r, z: cz - r }, { x: cx + r, z: cz - r },
       { x: cx - r, z: cz + r }, { x: cx + r, z: cz + r },
     ];
-
     for (const c of corners) {
-      const tc = Math.floor(c.x / T);
-      const tr = Math.floor(c.z / T);
-      if (!map.isWalkable(tc, tr)) return; // blocked
+      if (!this.mapData.isWalkable(Math.floor(c.x / T), Math.floor(c.z / T))) return;
     }
-
-    // Check door collision
     if (!this._canPassDoor(this.pos, newPos)) return;
-
     this.pos[axis] = newPos[axis];
   }
 
   _canPassDoor(from, to) {
-    // Doors are z-axis barriers (N/S doors block z movement)
     for (const door of this.mapData.doors) {
       if (door.open) continue;
-      const dz = door.dir === 'S' ? (door.row + 1) * T : door.row * T;
+      const dz  = door.dir === 'S' ? (door.row + 1) * T : door.row * T;
       const dx0 = door.col * T, dx1 = (door.col + 1) * T;
-
-      // Check if movement crosses this z-line within the door's x range
-      const playerX = (from.x + to.x) / 2;
-      if (playerX < dx0 - 0.1 || playerX > dx1 + 0.1) continue;
-
-      const crossesZ = (from.z < dz && to.z >= dz) || (from.z > dz && to.z <= dz);
-      if (crossesZ) return false;
+      const px  = (from.x + to.x) / 2;
+      if (px < dx0 - 0.15 || px > dx1 + 0.15) continue;
+      const crosses = (from.z < dz && to.z >= dz) || (from.z > dz && to.z <= dz);
+      if (crosses) return false;
     }
     return true;
   }
 
-  tryInteract(audio, items, monsters) {
+  // ── Interaction ──────────────────────────────────────────
+  tryInteract(audio, items) {
     const px = this.pos.x, pz = this.pos.z;
 
-    // Items
+    // Items first
     for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i];
-      const d = Math.hypot(px - item.worldX, pz - item.worldZ);
-      if (d < CFG.INTERACT_R) {
-        this._pickUp(item, audio);
+      const it = items[i];
+      if (Math.hypot(px - it.worldX, pz - it.worldZ) < CFG.INTERACT_R) {
+        this._pickUp(it, audio);
         items.splice(i, 1);
-        return { action: 'pickup', item };
+        return { action: 'pickup', item: it };
       }
     }
 
-    // Doors
-    const nearDoor = this._nearestDoor(px, pz);
-    if (nearDoor) {
-      if (this.inStorage && !nearDoor.open) {
-        // Lock/unlock
-        nearDoor.locked = !nearDoor.locked;
+    // Door
+    const nd = this._nearestDoor(px, pz);
+    if (nd) {
+      if (this.inStorage && !nd.open) {
+        nd.locked = !nd.locked;
         audio.playDoor();
-        return { action: nearDoor.locked ? 'locked' : 'unlocked' };
-      } else if (!nearDoor.locked) {
-        nearDoor.open = !nearDoor.open;
+        return { action: nd.locked ? 'locked' : 'unlocked' };
+      } else if (!nd.locked) {
+        nd.open = !nd.open;
         audio.playDoor();
-        return { action: nearDoor.open ? 'open' : 'close' };
+        return { action: nd.open ? 'open' : 'close' };
       } else {
         return { action: 'locked_hint' };
       }
@@ -174,14 +177,24 @@ export class Player {
   }
 
   _nearestDoor(px, pz) {
-    let best = null, bd = CFG.INTERACT_R;
+    let best = null, bd = CFG.INTERACT_R + 0.5;
     for (const d of this.mapData.doors) {
-      const doorX = (d.col + 0.5) * T;
-      const doorZ = d.dir === 'S' ? (d.row + 1) * T : d.row * T;
-      const dist  = Math.hypot(px - doorX, pz - doorZ);
-      if (dist < bd) { bd = dist; best = d; }
+      const cx = (d.col + 0.5) * T;
+      const cz = d.dir === 'S' ? (d.row + 1) * T : d.row * T;
+      const dd = Math.hypot(px - cx, pz - cz);
+      if (dd < bd) { bd = dd; best = d; }
     }
     return best;
+  }
+
+  getNearestItem(items) {
+    return items.find(it =>
+      Math.hypot(it.worldX - this.pos.x, it.worldZ - this.pos.z) < CFG.INTERACT_R
+    ) || null;
+  }
+
+  getNearestDoor() {
+    return this._nearestDoor(this.pos.x, this.pos.z);
   }
 
   _pickUp(item, audio) {
@@ -194,6 +207,8 @@ export class Player {
       case 'noise_trap': this.traps++; break;
     }
     if (item.mesh) item.mesh.parent?.remove(item.mesh);
+    if (item.label) item.label.parent?.remove(item.label);
+    if (item.glow)  item.glow.parent?.remove(item.glow);
   }
 
   tryCraft(audio) {

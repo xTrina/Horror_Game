@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CFG, MON } from './config.js';
 import { MapData, rng32 } from './mapdata.js';
-import { buildScene, animateDoors } from './scene.js';
+import { buildScene, animateDoors, addCorridorLights } from './scene.js';
 import { Player } from './player.js';
 import { buildItems, animateItems } from './items.js';
 import { spawnMonsters } from './monsters.js';
@@ -9,13 +9,14 @@ import { Audio3D } from './audio.js';
 
 const T = CFG.TILE;
 
-// ── Three.js setup ────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('gameCanvas'), antialias: true });
+// ── Renderer ──────────────────────────────────────────────
+const canvas3d = document.getElementById('gameCanvas');
+const renderer = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
 
-const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(80, 1, 0.05, 200);
 
 function resize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -26,451 +27,403 @@ resize();
 window.addEventListener('resize', resize);
 
 // ── State ─────────────────────────────────────────────────
-const STATES = { MENU: 0, PLAY: 1, DEAD: 2, ESCAPED: 3 };
-let state = STATES.MENU;
-
-let scene3d, mapData, player, monsters, items, traps;
-let flashlight, ambientLight, corridorLights = [];
-let audio = new Audio3D();
-let jumpScareAlpha = 0, jumpScareTimer = 0;
+const ST = { MENU: 0, PLAY: 1, DEAD: 2, ESCAPED: 3 };
+let state = ST.MENU;
+let scene3d, mapData, player, monsters, items, traps, corridorLights;
+let flashlight, flTarget;
+let jumpScareTimer = 0, jumpScareAlpha = 0;
 let proximityAlpha = 0;
+let deathType = null;
 let killedMonster = false;
-let deathMonsterType = null;
-let _lastTime = 0;
-let doorShakeTime = 0;
+let _last = 0;
+
+const audio = new Audio3D();
+
+// ── 2D overlay ────────────────────────────────────────────
+const cvs2 = document.getElementById('canvas2d');
+const ctx2  = cvs2.getContext('2d');
+function resize2d() { cvs2.width = window.innerWidth; cvs2.height = window.innerHeight; }
+resize2d(); window.addEventListener('resize', resize2d);
 
 // ── HUD elements ──────────────────────────────────────────
-const hud          = document.getElementById('hud');
-const hudKeys      = document.getElementById('hud-keys');
-const hudInv       = document.getElementById('hud-inv');
-const hudPrompt    = document.getElementById('hud-prompt');
-const hudNotif     = document.getElementById('hud-notif');
-const hudSafe      = document.getElementById('hud-safe');
-const hudDoor      = document.getElementById('hud-door');
-const overlay      = document.getElementById('overlay');
-const overlayTitle = document.getElementById('overlay-title');
-const overlayBody  = document.getElementById('overlay-body');
-const crosshair    = document.getElementById('crosshair');
-const clickPrompt  = document.getElementById('click-prompt');
-let notifTimeout   = null;
+const el = id => document.getElementById(id);
+const hud        = el('hud');
+const hudKeys    = el('hud-keys');
+const hudHp      = el('hud-hp');
+const hudInv     = el('hud-inv');
+const hudCraft   = el('hud-craft');
+const hudPrompt  = el('hud-prompt');
+const hudDoor    = el('hud-door');
+const hudSafe    = el('hud-safe');
+const hudNotif   = el('hud-notif');
+const crosshair  = el('crosshair');
+const overlay    = el('overlay');
+const ovTitle    = el('overlay-title');
+const ovBody     = el('overlay-body');
+let notifTimer   = null;
 
-function notify(text, color = '#ffcc00', dur = 3000) {
+function notify(text, color = '#ffcc00', ms = 3000) {
   hudNotif.textContent = text;
   hudNotif.style.color = color;
   hudNotif.style.opacity = '1';
-  clearTimeout(notifTimeout);
-  notifTimeout = setTimeout(() => { hudNotif.style.opacity = '0'; }, dur);
+  clearTimeout(notifTimer);
+  notifTimer = setTimeout(() => { hudNotif.style.opacity = '0'; }, ms);
 }
 
 function updateHUD() {
   if (!player) return;
-
   // Keycards
   let kc = '';
-  for (let i = 0; i < CFG.KEYCARD_PIECES; i++) {
-    const have = i < player.keycardCount;
-    kc += `<span class="kcard ${have ? 'have' : ''}">⬛</span>`;
-  }
-  hudKeys.innerHTML = '🗝 ' + kc;
+  for (let i = 0; i < CFG.KEYCARD_PIECES; i++)
+    kc += `<span class="kcard ${i < player.keycardCount ? 'have' : ''}">▪</span>`;
+  hudKeys.innerHTML = '🗝 ' + kc + ` ${player.keycardCount}/${CFG.KEYCARD_PIECES}`;
+
+  // HP
+  hudHp.textContent = '❤️'.repeat(player.hp) + '🖤'.repeat(3 - player.hp);
 
   // Inventory
   const inv = [];
-  if (player.hasWeapon) inv.push('⚒ Club');
-  else if (player.hasSlat) inv.push('🪵 Slat');
+  if (player.hasWeapon)  inv.push('⚒ Knüppel');
+  else if (player.hasSlat) inv.push('🪵 Latte');
   if (player.nails)     inv.push(`📌×${player.nails}`);
   if (player.medicines) inv.push(`💊×${player.medicines}`);
-  if (player.traps)     inv.push(`🔊×${player.traps}`);
-  hudInv.textContent = inv.join('  ') || '(nothing)';
-
-  // HP
-  document.getElementById('hud-hp').textContent = '❤️'.repeat(player.hp) + '🖤'.repeat(3 - player.hp);
+  if (player.traps)     inv.push(`📢×${player.traps}`);
+  hudInv.textContent = inv.join('  ') || '(leer)';
 
   // Safe zone
   hudSafe.style.opacity = player.inStorage ? '1' : '0';
 
-  // Door status near player
-  const nd = nearDoor();
+  // Nearest item prompt
+  const ni = player.getNearestItem(items || []);
+  if (ni) {
+    hudPrompt.textContent = `[E] Aufheben: ${ni.type}`;
+    hudPrompt.style.opacity = '1';
+  } else { hudPrompt.style.opacity = '0'; }
+
+  // Door prompt
+  const nd = player.getNearestDoor();
   if (nd) {
     if (player.inStorage && !nd.open) {
-      hudDoor.textContent = nd.locked ? '[E] Unlock door' : '[E] Lock door — hide inside!';
-      hudDoor.style.opacity = '1';
+      hudDoor.textContent = nd.locked ? '[E] Tür aufschließen' : '[E] Abschließen – verstecken!';
     } else if (!nd.locked) {
-      hudDoor.textContent = nd.open ? '[E] Close door' : '[E] Open door';
-      hudDoor.style.opacity = '1';
+      hudDoor.textContent = nd.open ? '[E] Tür schließen' : '[E] Tür öffnen';
     } else {
-      hudDoor.textContent = '🔒 Locked from inside';
-      hudDoor.style.opacity = '1';
+      hudDoor.textContent = '🔒 Von innen verriegelt';
     }
-  } else {
-    hudDoor.style.opacity = '0';
-  }
-
-  // Interaction prompt (items nearby)
-  const ni = nearItem();
-  if (ni) {
-    hudPrompt.textContent = `[E] Pick up ${ni.type}`;
-    hudPrompt.style.opacity = '1';
-  } else {
-    hudPrompt.style.opacity = '0';
-  }
+    hudDoor.style.opacity = '1';
+  } else { hudDoor.style.opacity = '0'; }
 
   // Craft prompt
-  const craft = document.getElementById('hud-craft');
   if (player.hasSlat && player.nails >= 2 && !player.hasWeapon) {
-    craft.textContent = '[C] Craft Spiked Club!';
-    craft.style.opacity = '1';
-  } else { craft.style.opacity = '0'; }
+    hudCraft.style.opacity = '1';
+  } else { hudCraft.style.opacity = '0'; }
 }
 
-function nearItem() {
-  if (!items) return null;
-  return items.find(it =>
-    Math.hypot(it.worldX - player.pos.x, it.worldZ - player.pos.z) < CFG.INTERACT_R
-  ) || null;
-}
-
-function nearDoor() {
-  if (!mapData) return null;
-  return mapData.doors.find(d => {
-    const dx = (d.col + 0.5) * T, dz = d.dir === 'S' ? (d.row + 1) * T : d.row * T;
-    return Math.hypot(dx - player.pos.x, dz - player.pos.z) < CFG.INTERACT_R;
-  }) || null;
-}
-
-// ── Init game ─────────────────────────────────────────────
-function initGame() {
+// ── Start game ────────────────────────────────────────────
+function startGame() {
   const seed = Date.now();
   const rng  = rng32(seed);
 
-  // Scene
-  if (scene3d) {
-    // Dispose previous scene objects
-    while (scene3d.children.length) scene3d.remove(scene3d.children[0]);
-  }
+  // Clear
   scene3d = new THREE.Scene();
-  scene3d.fog = new THREE.FogExp2(0x000000, 0.09);
+  scene3d.fog = new THREE.FogExp2(0x000000, 0.055);   // lighter fog = more visibility
 
-  // Lights
-  ambientLight = new THREE.AmbientLight(0x111122, 0.4);
-  scene3d.add(ambientLight);
+  // Ambient: slightly brighter so you can see outlines
+  scene3d.add(new THREE.AmbientLight(0x223344, 0.9));
 
-  flashlight = new THREE.SpotLight(0xffeedd, 3.5, CFG.FL_DIST, CFG.FL_ANGLE, 0.3, 1.5);
+  // Flashlight — wider cone, longer range, warmer colour
+  flashlight = new THREE.SpotLight(0xfff5e0, 5, 28, 0.52, 0.35, 1.2);
   flashlight.castShadow = true;
   flashlight.shadow.mapSize.set(512, 512);
-  flashlight.shadow.camera.far = CFG.FL_DIST;
-  const flTarget = new THREE.Object3D();
+  flashlight.shadow.camera.far = 28;
+  flTarget = new THREE.Object3D();
   scene3d.add(flTarget);
   flashlight.target = flTarget;
   scene3d.add(flashlight);
 
-  // Map
+  // Map + scene geometry
   mapData = new MapData(seed);
   buildScene(scene3d, mapData);
-
-  // Corridor point lights
-  corridorLights = [];
-  const junctions = mapData.corridorCentres().filter((_, i) => i % 12 === 0);
-  for (const j of junctions) {
-    const pl = new THREE.PointLight(0xffeeaa, 0.15, T * 3);
-    pl.position.set(j.x, CFG.WALL_H - 0.3, j.z);
-    scene3d.add(pl);
-    corridorLights.push(pl);
-  }
+  corridorLights = addCorridorLights(scene3d, mapData);
 
   // Player
-  const startPos = mapData.randomCorridorPos(rng);
-  player = new Player(camera, renderer, mapData);
-  player.setPosition(startPos.x, startPos.z);
-  if (player.controls) scene3d.add(player.controls.getObject?.() ?? camera);
+  const sp = mapData.randomCorridorPos(rng);
+  player = new Player(camera, canvas3d, mapData);
+  player.addToScene(scene3d);
+  player.setPosition(sp.x, sp.z);
+
+  // Pointer lock on canvas click
+  canvas3d.addEventListener('click', () => {
+    if (state === ST.PLAY) { player.controls.lock(); audio.resume(); }
+  }, { once: false });
 
   // Items
   items = buildItems(scene3d, mapData);
 
   // Monsters
-  monsters = spawnMonsters(mapData, startPos.x, startPos.z, rng);
+  monsters = spawnMonsters(mapData, sp.x, sp.z, rng);
   for (const m of monsters) scene3d.add(m.mesh);
 
-  // State
-  traps          = [];
-  killedMonster  = false;
-  deathMonsterType = null;
-  jumpScareAlpha = 0;
-  jumpScareTimer = 0;
+  traps         = [];
+  killedMonster = false;
+  deathType     = null;
+  jumpScareTimer = jumpScareAlpha = proximityAlpha = 0;
 
-  state = STATES.PLAY;
-  overlay.style.display = 'none';
-  hud.style.display     = 'block';
-  crosshair.style.display = 'block';
+  state = ST.PLAY;
+  overlay.style.display    = 'none';
+  hud.style.display        = 'block';
+  crosshair.style.display  = 'block';
+  el('click-prompt').style.display = 'block';
 }
 
 // ── Input ─────────────────────────────────────────────────
 window.addEventListener('keydown', e => {
-  if (state === STATES.MENU) { initGame(); audio.resume(); return; }
-  if ((state === STATES.DEAD || state === STATES.ESCAPED) && e.code === 'KeyR') { initGame(); return; }
-  if (state !== STATES.PLAY) return;
+  if (state === ST.MENU) { startGame(); audio.resume(); return; }
+  if (state !== ST.PLAY) {
+    if (e.code === 'KeyR') startGame();
+    return;
+  }
 
   if (e.code === 'KeyE') {
-    const result = player.tryInteract(audio, items, monsters);
-    if (result) {
-      if (result.action === 'pickup') {
-        if (result.item.type === 'keycard') {
+    const r = player.tryInteract(audio, items);
+    if (r) {
+      if (r.action === 'pickup') {
+        if (r.item.type === 'keycard') {
           notify(`🗝 Keycard ${player.keycardCount}/${CFG.KEYCARD_PIECES} gefunden!`, '#00ff88');
-          if (player.canEscape) notify('🗝 ALLE KEYCARDS! Finde den EXIT!', '#ffff00', 5000);
-        } else {
-          notify(`📦 ${result.item.type} aufgehoben`, '#aaccff', 2000);
-        }
-      } else if (result.action === 'locked') notify('🔒 Tür abgeschlossen – du bist sicher!', '#00ff88');
-      else if (result.action === 'unlocked') notify('🔓 Tür entsperrt', '#aaa', 1500);
-      else if (result.action === 'locked_hint') notify('🔒 Von innen abgesperrt', '#ff4444', 1500);
+          if (player.canEscape) notify('🗝 ALLE KEYCARDS – FINDE DEN EXIT!', '#ffff00', 6000);
+        } else { notify(`📦 ${r.item.type} aufgehoben`, '#aaccff', 2000); }
+      }
+      else if (r.action === 'locked')      notify('🔒 Tür verriegelt – du bist sicher!', '#00ff88');
+      else if (r.action === 'unlocked')    notify('🔓 Entriegelt', '#aaa', 1500);
+      else if (r.action === 'locked_hint') notify('🔒 Von innen verriegelt', '#ff4444', 1500);
     }
   }
-
-  if (e.code === 'KeyC') {
-    if (player.tryCraft(audio)) notify('⚒ Gezackter Knüppel gebaut!', '#ffcc00');
-  }
-  if (e.code === 'KeyH') {
-    if (player.tryHeal(audio)) notify('💊 Geheilt!', '#00ff88');
-  }
+  if (e.code === 'KeyC') { if (player.tryCraft(audio)) notify('⚒ Gezackter Knüppel gebaut!', '#ffcc00'); }
+  if (e.code === 'KeyH') { if (player.tryHeal(audio)) notify('💊 Geheilt!', '#00ff88'); }
   if (e.code === 'KeyF' || e.code === 'Space') {
-    if (player.tryAttack(monsters, audio)) triggerShake(10);
+    if (player.tryAttack(monsters, audio)) shakeFrames = 12;
   }
   if (e.code === 'KeyT') {
-    const trap = player.placeTrap(audio);
-    if (trap) { traps.push(trap); notify('🔊 Lärm-Falle platziert', '#ff9900', 1500); }
+    const t = player.placeTrap(audio);
+    if (t) { traps.push(t); notify('📢 Lärm-Falle platziert', '#ff9900', 1500); }
   }
   if (e.code === 'KeyM') {
-    const m = audio.toggleMute();
-    notify(m ? '🔇 Ton aus' : '🔊 Ton an', '#aaa', 1200);
+    notify(audio.toggleMute() ? '🔇 Ton aus' : '🔊 Ton an', '#aaa', 1200);
   }
 });
 
-document.getElementById('gameCanvas').addEventListener('click', () => {
-  if (state === STATES.MENU) { initGame(); audio.resume(); return; }
-  if (state === STATES.PLAY) { player.controls.lock(); audio.resume(); }
+// Click canvas to start from menu
+canvas3d.addEventListener('click', () => {
+  if (state === ST.MENU) { startGame(); audio.resume(); }
 });
 
-// Screen shake
-let shakeX = 0, shakeY = 0, shakeFrames = 0;
-function triggerShake(f) { shakeFrames = f; }
+// ── Screen shake ──────────────────────────────────────────
+let shakeFrames = 0;
 
 // ── Main loop ─────────────────────────────────────────────
 function loop(ts) {
   requestAnimationFrame(loop);
-  const dt = Math.min((ts - _lastTime) / 1000, 0.05);
-  _lastTime = ts;
+  const dt = Math.min((ts - _last) / 1000, 0.05);
+  _last = ts;
 
-  if (state === STATES.MENU) {
-    renderMenu();
-    return;
-  }
+  if (state === ST.MENU) { drawMenu(); return; }
 
-  if (state !== STATES.PLAY) {
+  if (state !== ST.PLAY) {
     renderer.render(scene3d, camera);
-    drawOverlayCanvas();
+    drawPlay2D();
     return;
   }
 
-  // ── Gameplay tick ──────────────────────────────────────
+  // ── Tick ──────────────────────────────────────────────
   player.update(dt, audio);
   animateItems(items, dt);
   animateDoors(mapData, dt);
 
   // Flashlight follows camera
-  const flDir = new THREE.Vector3();
-  camera.getWorldDirection(flDir);
-  flashlight.position.copy(camera.position);
-  flashlight.target.position.copy(camera.position).addScaledVector(flDir, 5);
-  flashlight.target.updateMatrixWorld();
+  const fl = flashlight;
+  fl.position.copy(player.pos);
+  fl.position.y = player.pos.y;
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  flTarget.position.copy(player.pos).addScaledVector(dir, 6);
+  flTarget.updateMatrixWorld();
 
   // Monsters
   for (const m of monsters) {
     m.update(dt, player, mapData, audio, traps);
-
-    // Jump scare proximity
     const d = Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z);
     if (d < T * 1.8 && !player.inStorage && jumpScareTimer <= 0) {
       jumpScareTimer = 90;
       jumpScareAlpha = 1;
       audio.playJumpScare();
-      triggerShake(25);
+      shakeFrames = 25;
     }
   }
 
-  // Traps decay
+  // Traps
   for (let i = traps.length - 1; i >= 0; i--) {
     traps[i].life -= dt * 60;
     if (traps[i].life <= 0) traps.splice(i, 1);
   }
 
-  // Corridor light flicker
-  if (Math.random() < 0.008) {
+  // Corridor flicker
+  if (Math.random() < 0.006 && corridorLights.length) {
     const pl = corridorLights[Math.floor(Math.random() * corridorLights.length)];
-    if (pl) pl.intensity = Math.random() < 0.3 ? 0 : 0.1 + Math.random() * 0.1;
+    pl.intensity = Math.random() < 0.25 ? 0 : 0.12 + Math.random() * 0.12;
   }
 
-  // Proximity heartbeat / vignette
-  const closestDist = monsters.reduce((mn, m) => Math.min(mn, Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z)), Infinity);
-  const tgtAlpha = closestDist < CFG.HEARTBEAT_DIST ? (1 - closestDist / CFG.HEARTBEAT_DIST) : 0;
-  proximityAlpha += (tgtAlpha - proximityAlpha) * Math.min(1, dt * 3);
-  audio.setHeartbeat(closestDist < CFG.HEARTBEAT_DIST && !player.inStorage);
+  // Proximity
+  const closest = monsters.reduce((mn, m) =>
+    Math.min(mn, Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z)), Infinity);
+  const tgt = closest < CFG.HEARTBEAT_DIST ? (1 - closest / CFG.HEARTBEAT_DIST) : 0;
+  proximityAlpha += (tgt - proximityAlpha) * Math.min(1, dt * 3);
+  audio.setHeartbeat(closest < CFG.HEARTBEAT_DIST && !player.inStorage);
 
-  // Jump scare decay
   if (jumpScareTimer > 0) jumpScareTimer -= dt * 60;
-  jumpScareAlpha = Math.max(0, jumpScareAlpha - dt * 1.5);
+  jumpScareAlpha = Math.max(0, jumpScareAlpha - dt * 1.8);
 
   // Screen shake
   if (shakeFrames > 0) {
     shakeFrames--;
-    shakeX = (Math.random() - 0.5) * shakeFrames * 0.03;
-    shakeY = (Math.random() - 0.5) * shakeFrames * 0.03;
-    camera.position.x += shakeX;
-    camera.position.y += shakeY;
+    const s = shakeFrames * 0.018;
+    player._yaw.position.x += (Math.random() - 0.5) * s;
+    player._yaw.position.y += (Math.random() - 0.5) * s;
+    // Restore Z immediately so pos.x/z aren't wrong for collision
   }
 
   // Exit check
   if (player.canEscape && mapData.exitTile) {
     const et = mapData.exitTile;
-    const ed = Math.hypot(player.pos.x - (et.x+0.5)*T, player.pos.z - (et.y+0.5)*T);
-    if (ed < T * 0.8) {
+    if (Math.hypot(player.pos.x - (et.x+0.5)*T, player.pos.z - (et.y+0.5)*T) < T * 0.85) {
       player.escaped = true;
-      state = STATES.ESCAPED;
-      audio.setHeartbeat(false);
-      audio.playEscape();
-      player.controls.unlock();
-      showEndScreen(false);
     }
   }
 
-  if (player.dead) {
-    state = STATES.DEAD;
+  if (player.dead || player.escaped) {
+    state = player.dead ? ST.DEAD : ST.ESCAPED;
     audio.setHeartbeat(false);
     player.controls.unlock();
-    deathMonsterType = monsters.reduce((b, m) => {
+    deathType = monsters.reduce((b, m) => {
       const d = Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z);
       return d < b.d ? { d, type: m.type } : b;
     }, { d: Infinity, type: MON.BLIND }).type;
-    showEndScreen(true);
+    showEnd(player.dead);
   }
 
   updateHUD();
   renderer.render(scene3d, camera);
-  drawOverlayCanvas();
+  drawPlay2D();
 }
 
-function renderMenu() {
-  if (!scene3d) {
-    // Draw menu on a plain canvas
-  }
-  renderer.setClearColor(0x000000);
-  renderer.clear();
-  drawMenuCanvas();
-}
-
-// ── 2D overlay canvas ────────────────────────────────────
-const cvs2 = document.getElementById('canvas2d');
-const ctx2  = cvs2.getContext('2d');
-
-function resize2d() { cvs2.width = window.innerWidth; cvs2.height = window.innerHeight; }
-resize2d();
-window.addEventListener('resize', resize2d);
-
-function drawOverlayCanvas() {
+// ── 2D overlays ───────────────────────────────────────────
+function drawPlay2D() {
   const w = cvs2.width, h = cvs2.height;
   ctx2.clearRect(0, 0, w, h);
 
-  // Vignette always
-  const vig = ctx2.createRadialGradient(w/2, h/2, h*0.25, w/2, h/2, h*0.8);
+  // Static vignette
+  const vig = ctx2.createRadialGradient(w/2, h/2, h*0.22, w/2, h/2, h*0.85);
   vig.addColorStop(0, 'rgba(0,0,0,0)');
-  vig.addColorStop(1, 'rgba(0,0,0,0.7)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.62)');
   ctx2.fillStyle = vig;
   ctx2.fillRect(0, 0, w, h);
 
   // Proximity red pulse
-  if (proximityAlpha > 0.02) {
-    const rv = ctx2.createRadialGradient(w/2, h/2, 0, w/2, h/2, Math.max(w,h));
-    rv.addColorStop(0, 'rgba(0,0,0,0)');
-    rv.addColorStop(0.6, `rgba(120,0,0,${proximityAlpha * 0.15})`);
-    rv.addColorStop(1,   `rgba(180,0,0,${proximityAlpha * 0.45})`);
+  if (proximityAlpha > 0.03) {
+    const rv = ctx2.createRadialGradient(w/2,h/2,0, w/2,h/2,Math.max(w,h));
+    rv.addColorStop(0,   'rgba(0,0,0,0)');
+    rv.addColorStop(0.55,`rgba(120,0,0,${proximityAlpha*0.14})`);
+    rv.addColorStop(1,   `rgba(200,0,0,${proximityAlpha*0.5})`);
     ctx2.fillStyle = rv;
     ctx2.fillRect(0, 0, w, h);
   }
 
-  // Jump scare flash
+  // Jump scare
   if (jumpScareAlpha > 0) {
-    ctx2.fillStyle = `rgba(180,0,0,${jumpScareAlpha * 0.7})`;
+    ctx2.fillStyle = `rgba(160,0,0,${jumpScareAlpha * 0.72})`;
     ctx2.fillRect(0, 0, w, h);
   }
 
-  // Safe zone blue tint
+  // Safe zone glow
   if (player?.inStorage) {
-    const pulse = 0.08 + 0.04 * Math.sin(Date.now() / 400);
-    ctx2.fillStyle = `rgba(0,80,180,${pulse})`;
+    const pulse = 0.07 + 0.04 * Math.sin(Date.now()/380);
+    ctx2.fillStyle = `rgba(0,80,200,${pulse})`;
     ctx2.fillRect(0, 0, w, h);
-    ctx2.strokeStyle = `rgba(0,150,255,${pulse * 4})`;
+    ctx2.strokeStyle = `rgba(60,160,255,${pulse * 5})`;
     ctx2.lineWidth = 4;
     ctx2.strokeRect(2, 2, w-4, h-4);
   }
 
-  // Exit glow on HUD when near
+  // Exit proximity glow
   if (player?.canEscape && mapData) {
     const et = mapData.exitTile;
-    if (et) {
-      const ed = Math.hypot(player.pos.x - (et.x+0.5)*T, player.pos.z - (et.y+0.5)*T);
-      if (ed < T * 3) {
-        const pulse = 0.4 + 0.3 * Math.sin(Date.now() / 200);
-        ctx2.fillStyle = `rgba(0,255,80,${pulse * 0.15})`;
-        ctx2.fillRect(0, 0, w, h);
-        ctx2.fillStyle = `rgba(0,255,80,${pulse})`;
-        ctx2.font = 'bold 18px monospace';
-        ctx2.textAlign = 'center';
-        ctx2.fillText('▼ EXIT ▼', w/2, h/2 + 40);
-      }
+    const d  = Math.hypot(player.pos.x-(et.x+0.5)*T, player.pos.z-(et.y+0.5)*T);
+    if (d < T * 3) {
+      const a = (1 - d/(T*3)) * (0.5 + 0.3 * Math.sin(Date.now()/180));
+      ctx2.fillStyle = `rgba(0,255,60,${a * 0.15})`;
+      ctx2.fillRect(0, 0, w, h);
+      ctx2.fillStyle = `rgba(0,255,60,${a * 0.9})`;
+      ctx2.font = 'bold 20px monospace';
+      ctx2.textAlign = 'center';
+      ctx2.shadowColor = '#00ff44';
+      ctx2.shadowBlur = 12;
+      ctx2.fillText('▼  EXIT  ▼', w/2, h/2 + 60);
+      ctx2.shadowBlur = 0;
     }
+  }
+
+  // Weapon swing flash
+  if (player?.swingFrame > 0) {
+    ctx2.fillStyle = `rgba(255,255,255,${(player.swingFrame/20) * 0.08})`;
+    ctx2.fillRect(0, 0, w, h);
   }
 }
 
-function drawMenuCanvas() {
+function drawMenu() {
   const w = cvs2.width, h = cvs2.height;
   ctx2.fillStyle = '#000';
   ctx2.fillRect(0, 0, w, h);
 
   const t = Date.now() / 1000;
-  const flicker = 0.8 + 0.2 * Math.sin(t * 14 + Math.random() * 0.3);
-  ctx2.shadowColor = '#ff0000';
-  ctx2.shadowBlur  = 30;
-  ctx2.fillStyle   = `rgba(200,0,0,${flicker})`;
-  ctx2.font        = 'bold 56px monospace';
+  const fl = 0.82 + 0.18 * Math.sin(t * 16 + Math.random() * 0.2);
+  ctx2.shadowColor = '#cc0000';
+  ctx2.shadowBlur  = 35;
+  ctx2.fillStyle   = `rgba(210,10,10,${fl})`;
+  ctx2.font        = 'bold 60px monospace';
   ctx2.textAlign   = 'center';
-  ctx2.fillText('STORAGE', w/2, h/2 - 60);
-  ctx2.fillText('NIGHTMARE', w/2, h/2 + 10);
+  ctx2.fillText('STORAGE', w/2, h/2 - 55);
+  ctx2.fillText('NIGHTMARE', w/2, h/2 + 20);
   ctx2.shadowBlur = 0;
 
-  ctx2.fillStyle = '#555';
+  ctx2.fillStyle = '#4a4a55';
   ctx2.font = '14px monospace';
-  ctx2.fillText('First-Person Horror', w/2, h/2 + 50);
-  ctx2.fillText('Sammle 4 Schlüsselkarten • Finde den Exit • Versteck dich', w/2, h/2 + 74);
+  ctx2.fillText('First-Person Horror  |  Sammle 4 Schlüsselkarten  |  Finde den Exit', w/2, h/2 + 62);
 
-  const pulse = 0.6 + 0.4 * Math.sin(t * 2);
-  ctx2.fillStyle = `rgba(180,180,100,${pulse})`;
-  ctx2.font = 'bold 17px monospace';
-  ctx2.fillText('[ KLICKEN ODER TASTE DRÜCKEN ]', w/2, h/2 + 130);
+  const p = 0.6 + 0.4 * Math.sin(t * 2.2);
+  ctx2.fillStyle = `rgba(190,185,110,${p})`;
+  ctx2.font = 'bold 18px monospace';
+  ctx2.fillText('[ KLICKEN ODER TASTE DRÜCKEN ]', w/2, h/2 + 118);
 
-  ctx2.fillStyle = '#333';
+  ctx2.fillStyle = '#2e2e38';
+  ctx2.fillRect(w/2-240, h/2+140, 480, 120);
+  ctx2.strokeStyle = '#3a3a48';
+  ctx2.lineWidth = 1;
+  ctx2.strokeRect(w/2-240, h/2+140, 480, 120);
+  ctx2.fillStyle = '#555';
+  ctx2.font = '12px monospace';
+  const lines = [
+    'WASD / Pfeiltasten  →  Bewegen',
+    'Maus (Klick zum Sperren)  →  Umsehen  |  Shift  →  Sprinten',
+    'E  →  Aufheben / Tür öffnen-schließen-abschließen',
+    'F / Leertaste  →  Angreifen  |  C  →  Waffe craften  |  H  →  Heilen  |  M  →  Ton',
+  ];
+  lines.forEach((l, i) => ctx2.fillText(l, w/2, h/2 + 162 + i * 22));
+
+  ctx2.fillStyle = '#2a2a2a';
   ctx2.font = '11px monospace';
-  ctx2.fillText('⚠ Enthält Jump Scares', w/2, h - 22);
-
-  // Controls
-  ctx2.fillStyle = '#3a3a3a';
-  ctx2.fillRect(w/2 - 220, h/2 + 155, 440, 105);
-  ctx2.fillStyle = '#666';
-  ctx2.font = '11px monospace';
-  const lines = ['WASD = Bewegen  |  Maus = Umsehen  |  Shift = Sprinten',
-    'E = Aufheben / Tür  |  F / Leertaste = Angreifen',
-    'C = Knüppel craften  |  H = Heilen  |  T = Falle  |  M = Ton'];
-  lines.forEach((l, i) => ctx2.fillText(l, w/2, h/2 + 175 + i*18));
+  ctx2.fillText('⚠ Enthält Jump Scares', w/2, h - 16);
 }
 
-function showEndScreen(dead) {
+function showEnd(dead) {
   overlay.style.display = 'flex';
   hud.style.display     = 'none';
   crosshair.style.display = 'none';
@@ -478,18 +431,17 @@ function showEndScreen(dead) {
   if (dead) {
     const msgs = {
       [MON.BLIND]:   'Es hat deine Schritte gehört.',
-      [MON.DEAF]:    'Es hat dich gesehen. Du konntest nicht entkommen.',
-      [MON.STALKER]: 'Es stand schon hinter dir.',
+      [MON.DEAF]:    'Es hat dich gesehen. Kein Entkommen.',
+      [MON.STALKER]: 'Es stand bereits hinter dir.',
     };
-    overlayTitle.textContent = 'DU BIST GESTORBEN';
-    overlayTitle.style.color = '#cc0000';
-    overlayBody.innerHTML = `<p>${msgs[deathMonsterType] || 'Die Dunkelheit hat dich verschluckt.'}</p><p class="restart">[R] Nochmal versuchen</p>`;
+    ovTitle.textContent = 'DU BIST GESTORBEN';
+    ovTitle.style.color = '#cc0000';
+    ovBody.innerHTML = `<p>${msgs[deathType] || 'Die Dunkelheit verschluckte dich.'}</p><p class="restart">[R] Nochmal versuchen</p>`;
   } else {
-    overlayTitle.textContent = killedMonster ? '★ MONSTER-JÄGER ★' : '◆ ENTKOMMEN ◆';
-    overlayTitle.style.color = '#00ff88';
-    overlayBody.innerHTML = `<p>${killedMonster ? 'Du hast zurückgekämpft und bist entkommen.' : 'Du bist lautlos in die Nacht verschwunden.'}</p><p style="color:#ff6600">🏆 Kosmetik freigeschaltet: Storage Überlebender</p><p class="restart">[R] Nochmal spielen</p>`;
+    ovTitle.textContent = '◆ ENTKOMMEN ◆';
+    ovTitle.style.color = '#00ff88';
+    ovBody.innerHTML = `<p>Du bist lautlos in die Nacht verschwunden.</p><p style="color:#ff6600;margin-top:12px">🏆 Freischaltung: Storage-Überlebender</p><p class="restart">[R] Nochmal spielen</p>`;
   }
 }
 
-// ── Boot ──────────────────────────────────────────────────
 requestAnimationFrame(loop);
