@@ -1,32 +1,94 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-html, body {
-  width: 100%; height: 100%;
-  background: #000;
-  overflow: hidden;
-  font-family: monospace;
-}
+html, body { width: 100%; height: 100%; background: #000; overflow: hidden; font-family: monospace; }
 
 #gameCanvas {
-  display: block;
-  width: 100vw;
-  height: 100vh;
-  cursor: crosshair;
-  image-rendering: pixelated;
+  position: fixed; inset: 0;
+  width: 100%; height: 100%;
+  display: block; cursor: none;
+}
+#canvas2d {
+  position: fixed; inset: 0;
+  pointer-events: none; z-index: 5;
 }
 
-/* Loading screen */
-#loadingScreen {
-  position: fixed;
-  inset: 0;
-  background: #000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #440000;
-  font-size: 20px;
-  letter-spacing: 4px;
-  z-index: 10;
-  transition: opacity 0.5s;
+/* ── HUD ── */
+#hud {
+  position: fixed; inset: 0;
+  pointer-events: none; z-index: 10;
+  display: none;
 }
-#loadingScreen.hidden { opacity: 0; pointer-events: none; }
+#hud-keys {
+  position: absolute; top: 14px; left: 14px;
+  background: rgba(0,0,0,.6); color: #aac8ff;
+  padding: 6px 12px; border-radius: 6px;
+  font-size: 13px; letter-spacing: 2px;
+}
+.kcard { color: #334455; font-size: 16px; margin: 0 2px; }
+.kcard.have { color: #00ff88; }
+
+#hud-hp {
+  position: absolute; top: 50px; left: 14px;
+  background: rgba(0,0,0,.55); padding: 5px 10px; border-radius: 6px;
+  font-size: 14px;
+}
+#hud-inv {
+  position: absolute; top: 88px; left: 14px;
+  background: rgba(0,0,0,.55); color: #ccc;
+  padding: 5px 12px; border-radius: 6px;
+  font-size: 11px; max-width: 220px;
+}
+#hud-craft {
+  position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%);
+  background: rgba(80,60,0,.85); color: #ffcc00;
+  padding: 7px 18px; border-radius: 6px; font-size: 13px;
+  opacity: 0; transition: opacity .3s;
+}
+#hud-prompt {
+  position: absolute; bottom: 72px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,60,30,.8); color: #00ff88;
+  padding: 7px 18px; border-radius: 6px; font-size: 13px;
+  opacity: 0; transition: opacity .3s; white-space: nowrap;
+}
+#hud-door {
+  position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,60,.8); color: #aaddff;
+  padding: 6px 16px; border-radius: 6px; font-size: 12px;
+  opacity: 0; transition: opacity .3s; white-space: nowrap;
+}
+#hud-safe {
+  position: absolute; top: 14px; right: 14px;
+  color: #00ff88; font-size: 12px; letter-spacing: 1px;
+  background: rgba(0,60,30,.7); padding: 5px 12px; border-radius: 6px;
+  opacity: 0; transition: opacity .4s;
+}
+#hud-notif {
+  position: absolute; top: 80px; left: 50%; transform: translateX(-50%);
+  font-size: 14px; font-weight: bold;
+  background: rgba(0,0,0,.7); padding: 6px 16px; border-radius: 6px;
+  opacity: 0; transition: opacity .5s; white-space: nowrap;
+}
+#crosshair {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  color: rgba(255,255,255,.5); font-size: 20px; pointer-events: none;
+  z-index: 20; display: none; user-select: none; line-height: 1;
+}
+
+/* ── Overlays ── */
+#overlay {
+  position: fixed; inset: 0; z-index: 30;
+  background: rgba(0,0,0,.88);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  text-align: center; gap: 16px;
+}
+#overlay-title {
+  font-size: 44px; font-weight: bold; letter-spacing: 4px;
+}
+#overlay-body { color: #888; font-size: 15px; line-height: 2; }
+#overlay-body .restart { color: #666; margin-top: 16px; font-size: 13px; }
+
+#click-prompt {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,.25); font-size: 12px; z-index: 25;
+  pointer-events: none;
+}

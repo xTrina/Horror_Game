@@ -1,241 +1,261 @@
-// ============================================================
-//  MONSTERS  (3 types with distinct AI)
-// ============================================================
+import * as THREE from 'three';
+import { CFG, MON, TILE_TYPE as TT } from './config.js';
 
-class Monster {
-  constructor(x, y, type, rng) {
-    this.x      = x;
-    this.y      = y;
-    this.type   = type;
-    this.rng    = rng;
-    this.angle  = 0;
-    this.radius = 16;
-    this.stunTimer   = 0;
-    this.chaseTimer  = 0;   // frames left chasing last known pos
-    this.targetX = x;
-    this.targetY = y;
-    this.lastKnownX = x;
-    this.lastKnownY = y;
-    this.wanderTimer = 0;
-    this.jumpScareTriggered = false;
-    this.visible = true;   // for Stalker flicker
-    this.flickerTimer = 0;
-    this.patrolPoints = [];
-    this.patrolIdx   = 0;
+const T = CFG.TILE;
 
-    // per-type
-    switch (type) {
-      case M.BLIND:   this.speed = CFG.BLIND_SPEED;   this.sightRange = 0;   this.hearRange = 9; break;
-      case M.DEAF:    this.speed = CFG.DEAF_SPEED;    this.sightRange = 12;  this.hearRange = 0; break;
-      case M.STALKER: this.speed = CFG.STALKER_SPEED; this.sightRange = 5;   this.hearRange = 5; break;
-    }
+// ── Monster mesh builder ─────────────────────────────────
+function buildMonsterMesh(type) {
+  const group = new THREE.Group();
 
-    this.chasing = false;
+  let bodyColor, headColor, eyeColor;
+  switch (type) {
+    case MON.BLIND:   bodyColor = 0xc8b89a; headColor = 0xd4c4aa; eyeColor = 0x333333; break;
+    case MON.DEAF:    bodyColor = 0x1a1a2a; headColor = 0x2a2a3a; eyeColor = 0xff0000; break;
+    case MON.STALKER: bodyColor = 0x150022; headColor = 0x200030; eyeColor = 0xffffff; break;
   }
 
-  // Called each frame
-  update(player, map, audio, traps) {
-    if (this.stunTimer > 0) { this.stunTimer--; this.visible = this.stunTimer % 6 < 3; return; }
-    this.visible = true;
+  // Body
+  const bodyGeo = new THREE.CapsuleGeometry(0.32, 1.0, 4, 8);
+  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+  const body    = new THREE.Mesh(bodyGeo, bodyMat);
+  body.position.y = 1.0;
+  body.castShadow = true;
+  group.add(body);
 
-    const dist = Math.hypot(this.x - player.x, this.y - player.y);
+  // Head
+  const headGeo = new THREE.SphereGeometry(0.28, 8, 8);
+  const headMat = new THREE.MeshLambertMaterial({ color: headColor });
+  const head    = new THREE.Mesh(headGeo, headMat);
+  head.position.y = 2.0;
+  head.castShadow = true;
+  group.add(head);
 
-    // ── SAFE ZONE enforcement ──────────────────────────────
-    const ptx = Math.floor(player.x / CFG.TILE);
-    const pty = Math.floor(player.y / CFG.TILE);
-    if (map.isStorage(ptx, pty)) {
-      // Monster must stay at least MONSTER_SAFE_DIST tiles from any storage tile adjacent
-      this._enforceNoStorageCamping(map);
+  // Eyes
+  const eyeGeo  = new THREE.SphereGeometry(0.07, 6, 6);
+  const eyeMat  = new THREE.MeshStandardMaterial({ color: eyeColor, emissive: eyeColor, emissiveIntensity: 2 });
+  const eyeL    = new THREE.Mesh(eyeGeo, eyeMat);
+  const eyeR    = new THREE.Mesh(eyeGeo.clone(), eyeMat.clone());
+  eyeL.position.set(-0.1, 2.05, 0.24);
+  eyeR.position.set( 0.1, 2.05, 0.24);
+  group.add(eyeL, eyeR);
+
+  if (type === MON.BLIND) {
+    // Stitch lines over eyes
+    const stMat = new THREE.LineBasicMaterial({ color: 0x111111 });
+    for (const side of [-0.1, 0.1]) {
+      const pts = [new THREE.Vector3(side-0.08, 2.1, 0.28), new THREE.Vector3(side+0.08, 2.0, 0.28)];
+      const sg  = new THREE.BufferGeometry().setFromPoints(pts);
+      group.add(new THREE.Line(sg, stMat));
+    }
+    // Long arms
+    for (const side of [-1, 1]) {
+      const armGeo = new THREE.CapsuleGeometry(0.07, 0.9, 4, 6);
+      const armMat = new THREE.MeshLambertMaterial({ color: bodyColor });
+      const arm    = new THREE.Mesh(armGeo, armMat);
+      arm.position.set(side * 0.5, 0.7, 0);
+      arm.rotation.z = side * 0.5;
+      arm.castShadow = true;
+      group.add(arm);
+    }
+  }
+
+  if (type === MON.STALKER) {
+    // Tendrils
+    const tMat = new THREE.LineBasicMaterial({ color: 0x660099 });
+    for (let i = 0; i < 4; i++) {
+      const angle = (i / 4) * Math.PI * 2;
+      const pts = [
+        new THREE.Vector3(0, 1.0, 0),
+        new THREE.Vector3(Math.cos(angle) * 0.6, 0.4, Math.sin(angle) * 0.6),
+        new THREE.Vector3(Math.cos(angle) * 1.0, 0.1, Math.sin(angle) * 1.0),
+      ];
+      const tg = new THREE.BufferGeometry().setFromPoints(pts);
+      group.add(new THREE.Line(tg, tMat));
+    }
+  }
+
+  group._eyeL = eyeL;
+  group._eyeR = eyeR;
+  group._body = body;
+  group._head = head;
+  return group;
+}
+
+// ── Monster class ─────────────────────────────────────────
+export class Monster {
+  constructor(worldX, worldZ, type, rng) {
+    this.pos  = new THREE.Vector3(worldX, 0, worldZ);
+    this.type = type;
+    this.rng  = rng;
+
+    this.speed      = type === MON.BLIND ? CFG.BLIND_SPD : type === MON.DEAF ? CFG.DEAF_SPD : CFG.STALKER_SPD;
+    this.stunTimer  = 0;        // frames
+    this.chaseTimer = 0;
+    this.chasing    = false;
+    this.targetX    = worldX;
+    this.targetZ    = worldZ;
+    this.wanderTimer= 0;
+    this.flickerT   = 0;
+    this.visible    = true;
+    this.angle      = 0;
+
+    this.mesh = buildMonsterMesh(type);
+    this.mesh.position.copy(this.pos);
+  }
+
+  get tileCol() { return Math.floor(this.pos.x / T); }
+  get tileRow() { return Math.floor(this.pos.z / T); }
+
+  update(dt, player, mapData, audio, traps) {
+    if (this.stunTimer > 0) {
+      this.stunTimer -= dt * 60;
+      this.visible = (Math.floor(this.stunTimer / 3) % 2) === 0;
+      this.mesh.visible = this.visible;
+      return;
+    }
+    this.mesh.visible = true;
+
+    // Safe zone: player in storage → back off
+    if (player.inStorage) {
+      this._enforceBackOff(mapData);
     }
 
-    // ── Monster-specific perception ───────────────────────
+    // Per-type perception
     switch (this.type) {
-      case M.BLIND:   this._updateBlind(player, map, audio, dist, traps); break;
-      case M.DEAF:    this._updateDeaf(player, map, audio, dist); break;
-      case M.STALKER: this._updateStalker(player, map, audio, dist); break;
+      case MON.BLIND:   this._updateBlind(dt, player, traps); break;
+      case MON.DEAF:    this._updateDeaf(dt, player, mapData); break;
+      case MON.STALKER: this._updateStalker(dt, player, mapData, audio); break;
     }
 
-    // ── Move toward target ────────────────────────────────
-    if (this.chasing || this.type === M.STALKER) {
-      this._moveToward(this.targetX, this.targetY, map);
-    } else {
-      this._wander(map);
+    // Move
+    const spd = this.speed * dt;
+    const dx  = this.targetX - this.pos.x;
+    const dz  = this.targetZ - this.pos.z;
+    const d   = Math.hypot(dx, dz);
+    if (d > 0.3) {
+      this.angle = Math.atan2(dx, dz);
+      const nx = this.pos.x + (dx / d) * spd;
+      const nz = this.pos.z + (dz / d) * spd;
+      const tc = Math.floor(nx / T), tr = Math.floor(nz / T);
+      if (mapData.isWalkable(tc, tr) && !mapData.isStorage(tc, tr)) {
+        this.pos.x = nx; this.pos.z = nz;
+      }
     }
 
-    // ── Attack player if close ────────────────────────────
-    if (dist < CFG.TILE * CFG.JUMPSCREEEN_DIST && !map.isStorage(ptx, pty)) {
-      if (!this.jumpScareTriggered) {
-        this.jumpScareTriggered = true;
-        audio.triggerJumpScare(this.type);
-        setTimeout(() => { this.jumpScareTriggered = false; }, 3000);
-      }
-      if (dist < this.radius + player.radius + 4) {
-        player.takeDamage(audio);
-      }
+    // Bob animation
+    this._animT = (this._animT || 0) + dt;
+    this.mesh.position.set(this.pos.x, Math.sin(this._animT * 4) * 0.05, this.pos.z);
+    this.mesh.rotation.y = this.angle;
+
+    // Attack range
+    const dist = Math.hypot(this.pos.x - player.pos.x, this.pos.z - player.pos.z);
+    if (dist < 0.9 && !player.inStorage) {
+      player.takeDamage(audio);
     }
   }
 
-  // ─── Blind: only hears ────────────────────────────────────
-  _updateBlind(player, map, audio, dist, traps) {
+  _updateBlind(dt, player, traps) {
     // Check noise traps
     for (const trap of traps) {
       if (!trap.triggered) {
-        const td = Math.hypot(this.x - trap.x, this.y - trap.y);
-        if (td < this.hearRange * CFG.TILE) {
+        const d = Math.hypot(this.pos.x - trap.x, this.pos.z - trap.z);
+        if (d < 9 * T) {
           trap.triggered = true;
-          this.lastKnownX = trap.x;
-          this.lastKnownY = trap.y;
-          this.targetX    = trap.x;
-          this.targetY    = trap.y;
-          this.chasing    = true;
-          this.chaseTimer = 200;
+          this.targetX = trap.x; this.targetZ = trap.z;
+          this.chasing = true; this.chaseTimer = 200;
         }
       }
     }
-
-    const noise = player.noise + (player.sprinting ? 4 : 0);
-    if (noise > 0.5 && dist < this.hearRange * CFG.TILE) {
-      this.lastKnownX = player.x + (this.rng() - 0.5) * CFG.TILE * noise * 0.3;
-      this.lastKnownY = player.y + (this.rng() - 0.5) * CFG.TILE * noise * 0.3;
-      this.targetX = this.lastKnownX;
-      this.targetY = this.lastKnownY;
-      this.chasing = true;
-      this.chaseTimer = 180;
+    const dist = Math.hypot(this.pos.x - player.pos.x, this.pos.z - player.pos.z);
+    if (player.noise > 0.5 && dist < 9 * T) {
+      this.targetX = player.pos.x + (this.rng() - 0.5) * T * player.noise * 0.3;
+      this.targetZ = player.pos.z + (this.rng() - 0.5) * T * player.noise * 0.3;
+      this.chasing = true; this.chaseTimer = 180;
     } else if (this.chaseTimer > 0) {
-      this.chaseTimer--;
+      this.chaseTimer -= dt * 60;
       if (this.chaseTimer <= 0) this.chasing = false;
     }
+    if (!this.chasing) this._wander(dt);
   }
 
-  // ─── Deaf: only sees (same corridor line of sight) ───────
-  _updateDeaf(player, map, audio, dist) {
-    const mx = Math.floor(this.x / CFG.TILE);
-    const my = Math.floor(this.y / CFG.TILE);
-    const px = Math.floor(player.x / CFG.TILE);
-    const py = Math.floor(player.y / CFG.TILE);
+  _updateDeaf(dt, player, mapData) {
+    const mc = this.tileCol, mr = this.tileRow;
+    const pc = player.tileCol, pr = player.tileRow;
+    const dist = Math.hypot(this.pos.x - player.pos.x, this.pos.z - player.pos.z);
+    const sameLine = (mc === pc || mr === pr) && dist < 12 * T;
 
-    // Line-of-sight: must be in same row OR same column AND within range
-    const sameRow = my === py;
-    const sameCol = mx === px;
-    if ((sameRow || sameCol) && dist < this.sightRange * CFG.TILE) {
-      // Check clear line
-      if (this._hasLineOfSight(map, mx, my, px, py)) {
-        this.targetX = player.x;
-        this.targetY = player.y;
-        this.lastKnownX = player.x;
-        this.lastKnownY = player.y;
-        this.chasing = true;
-        this.chaseTimer = 240;
-      }
+    if (sameLine && this._hasLOS(mapData, mc, mr, pc, pr)) {
+      this.targetX = player.pos.x; this.targetZ = player.pos.z;
+      this.chasing = true; this.chaseTimer = 240;
     } else if (this.chaseTimer > 0) {
-      this.chaseTimer--;
+      this.chaseTimer -= dt * 60;
       if (this.chaseTimer <= 0) this.chasing = false;
     }
+    if (!this.chasing) this._wander(dt);
   }
 
-  _hasLineOfSight(map, x0, y0, x1, y1) {
-    const dx = Math.sign(x1 - x0), dy = Math.sign(y1 - y0);
+  _hasLOS(mapData, x0, y0, x1, y1) {
+    const sx = Math.sign(x1 - x0), sy = Math.sign(y1 - y0);
     let cx = x0, cy = y0;
     while (cx !== x1 || cy !== y1) {
-      cx += dx; cy += dy;
-      if (!map.isWalkable(cx, cy)) return false;
+      cx += sx; cy += sy;
+      if (!mapData.isWalkable(cx, cy)) return false;
     }
     return true;
   }
 
-  // ─── Stalker: random teleport + slow stalk ───────────────
-  _updateStalker(player, map, audio, dist) {
-    this.flickerTimer++;
-
-    // Random teleport every ~8-12 seconds
-    if (this.flickerTimer > 480 + Math.floor(this.rng() * 240)) {
-      this.flickerTimer = 0;
-      // Teleport to a random corridor tile near player (4-8 tiles away)
-      const angle  = this.rng() * Math.PI * 2;
-      const tdist  = (4 + this.rng() * 4) * CFG.TILE;
-      let tx = player.x + Math.cos(angle) * tdist;
-      let ty = player.y + Math.sin(angle) * tdist;
-      // Snap to nearest walkable tile
-      const ntx = Math.floor(tx / CFG.TILE);
-      const nty = Math.floor(ty / CFG.TILE);
-      if (map.isWalkable(ntx, nty) && !map.isStorage(ntx, nty)) {
-        this.x = (ntx + 0.5) * CFG.TILE;
-        this.y = (nty + 0.5) * CFG.TILE;
+  _updateStalker(dt, player, mapData, audio) {
+    this.flickerT += dt;
+    // Teleport every 8-14s
+    if (this.flickerT > 8 + this.rng() * 6) {
+      this.flickerT = 0;
+      const angle = this.rng() * Math.PI * 2;
+      const dist  = (4 + this.rng() * 4) * T;
+      const tx = player.pos.x + Math.cos(angle) * dist;
+      const tz = player.pos.z + Math.sin(angle) * dist;
+      const tc = Math.floor(tx / T), tr = Math.floor(tz / T);
+      if (mapData.isWalkable(tc, tr) && !mapData.isStorage(tc, tr)) {
+        this.pos.x = (tc + 0.5) * T; this.pos.z = (tr + 0.5) * T;
         audio.playTeleport();
       }
     }
+    const dist = Math.hypot(this.pos.x - player.pos.x, this.pos.z - player.pos.z);
+    if (dist < 6 * T) { this.targetX = player.pos.x; this.targetZ = player.pos.z; this.chasing = true; }
+    else this.chasing = false;
+    if (!this.chasing) this._wander(dt);
 
-    // Always slowly stalks toward player
-    if (dist < this.sightRange * CFG.TILE) {
-      this.targetX = player.x;
-      this.targetY = player.y;
-      this.chasing = true;
-    } else {
-      this.chasing = false;
+    // Flicker mesh
+    this.mesh.visible = Math.random() > 0.04;
+  }
+
+  _enforceBackOff(mapData) {
+    // Must stay out of storage tiles
+    if (mapData.isStorage(this.tileCol, this.tileRow)) {
+      const corr = mapData.corridorCentres();
+      const near = corr.reduce((b, c) => {
+        const d = Math.hypot(this.pos.x - c.x, this.pos.z - c.z);
+        return d < b.d ? { d, c } : b;
+      }, { d: Infinity, c: null });
+      if (near.c) { this.pos.x = near.c.x; this.pos.z = near.c.z; }
     }
   }
 
-  // ─── Safe zone enforcement ───────────────────────────────
-  _enforceNoStorageCamping(map) {
-    // Find nearest storage tile; if monster is within MONSTER_SAFE_DIST, push away
-    const tx = Math.floor(this.x / CFG.TILE);
-    const ty = Math.floor(this.y / CFG.TILE);
-    const safeDist = CFG.MONSTER_SAFE_DIST * CFG.TILE;
-
-    for (const s of map.storages) {
-      const sx = (s.x + 0.5) * CFG.TILE;
-      const sy = (s.y + (s.side === 'top' ? 0.5 : 1.5)) * CFG.TILE;
-      const d  = Math.hypot(this.x - sx, this.y - sy);
-      if (d < safeDist) {
-        const ang = Math.atan2(this.y - sy, this.x - sx);
-        this.x = sx + Math.cos(ang) * safeDist;
-        this.y = sy + Math.sin(ang) * safeDist;
-        // Snap back to corridor
-        const ntx = Math.floor(this.x / CFG.TILE);
-        const nty = Math.floor(this.y / CFG.TILE);
-        if (!map.isWalkable(ntx, nty)) {
-          // Find nearest corridor tile
-          const near = map.corridors.reduce((best, c) => {
-            const cd = Math.hypot(this.x - c.x * CFG.TILE, this.y - c.y * CFG.TILE);
-            return cd < best.d ? {d: cd, c} : best;
-          }, {d: Infinity, c: null});
-          if (near.c) { this.x = (near.c.x + 0.5) * CFG.TILE; this.y = (near.c.y + 0.5) * CFG.TILE; }
+  _wander(dt) {
+    this.wanderTimer -= dt;
+    const d = Math.hypot(this.pos.x - this.targetX, this.pos.z - this.targetZ);
+    if (this.wanderTimer <= 0 || d < T * 0.5) {
+      const corr = this.mapData_ref?.corridorCentres?.() || [];
+      this.wanderTimer = 2 + this.rng() * 3;
+      // pick random corridor near current position
+      const nearby = [];
+      for (let dr = -3; dr <= 3; dr++)
+        for (let dc = -3; dc <= 3; dc++) {
+          const c = this.tileCol + dc, r = this.tileRow + dr;
+          // Simple: just pick random offset
         }
-        break;
-      }
+      this.targetX = this.pos.x + (this.rng() - 0.5) * T * 4;
+      this.targetZ = this.pos.z + (this.rng() - 0.5) * T * 4;
     }
-  }
-
-  // ─── Movement helpers ────────────────────────────────────
-  _moveToward(tx, ty, map) {
-    const dist = Math.hypot(this.x - tx, this.y - ty);
-    if (dist < 4) return;
-    const angle = Math.atan2(ty - this.y, tx - this.x);
-    this.angle = angle;
-    const spd = this.stunTimer > 0 ? 0 : this.speed;
-    const nx = this.x + Math.cos(angle) * spd;
-    const ny = this.y + Math.sin(angle) * spd;
-    const ntx = Math.floor(nx / CFG.TILE);
-    const nty = Math.floor(ny / CFG.TILE);
-    if (map.isWalkable(ntx, Math.floor(this.y / CFG.TILE)) && !map.isStorage(ntx, Math.floor(this.y / CFG.TILE))) {
-      this.x = nx;
-    }
-    if (map.isWalkable(Math.floor(this.x / CFG.TILE), nty) && !map.isStorage(Math.floor(this.x / CFG.TILE), nty)) {
-      this.y = ny;
-    }
-  }
-
-  _wander(map) {
-    this.wanderTimer--;
-    if (this.wanderTimer <= 0 || !map.isWalkable(
-        Math.floor(this.targetX / CFG.TILE), Math.floor(this.targetY / CFG.TILE))) {
-      // Pick random corridor
-      const c = map.corridors[Math.floor(this.rng() * map.corridors.length)];
-      this.targetX = (c.x + 0.5) * CFG.TILE;
-      this.targetY = (c.y + 0.5) * CFG.TILE;
-      this.wanderTimer = 120 + Math.floor(this.rng() * 180);
-    }
-    this._moveToward(this.targetX, this.targetY, map);
   }
 
   stun(frames) {
@@ -244,19 +264,15 @@ class Monster {
   }
 }
 
-// ─── Factory ─────────────────────────────────────────────
-function spawnMonsters(map, playerX, playerY, rng) {
-  const types = [M.BLIND, M.DEAF, M.STALKER];
+export function spawnMonsters(mapData, playerX, playerZ, rng) {
   const monsters = [];
-
-  for (const type of types) {
+  for (const type of [MON.BLIND, MON.DEAF, MON.STALKER]) {
     let pos;
-    // Spawn far from player (at least 8 tiles)
-    do {
-      pos = map.getRandomCorridorPos();
-    } while (Math.hypot(pos.x - playerX, pos.y - playerY) < CFG.TILE * 8);
-
-    monsters.push(new Monster(pos.x, pos.y, type, rng));
+    do { pos = mapData.randomCorridorPos(rng); }
+    while (Math.hypot(pos.x - playerX, pos.z - playerZ) < T * 8);
+    const m = new Monster(pos.x, pos.z, type, rng);
+    m.mapData_ref = mapData; // for wander
+    monsters.push(m);
   }
   return monsters;
 }

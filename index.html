@@ -5,28 +5,43 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Storage Nightmare</title>
   <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./lib/three.module.js",
+      "three/addons/": "./lib/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
-  <div id="loadingScreen">LOADING...</div>
   <canvas id="gameCanvas"></canvas>
+  <canvas id="canvas2d"></canvas>
 
-  <script src="js/config.js"></script>
-  <script src="js/map.js"></script>
-  <script src="js/player.js"></script>
-  <script src="js/monsters.js"></script>
-  <script src="js/audio.js"></script>
-  <script src="js/renderer.js"></script>
-  <script src="js/ui.js"></script>
-  <script src="js/game.js"></script>
+  <div id="hud">
+    <div id="hud-keys"></div>
+    <div id="hud-hp"></div>
+    <div id="hud-inv"></div>
+    <div id="hud-craft"></div>
+    <div id="hud-prompt"></div>
+    <div id="hud-door"></div>
+    <div id="hud-safe">◉ SAFE ZONE</div>
+    <div id="hud-notif"></div>
+  </div>
 
-  <script>
-    // Hide loading screen once game boots
-    window.addEventListener('DOMContentLoaded', () => {
-      setTimeout(() => {
-        const ls = document.getElementById('loadingScreen');
-        if (ls) ls.classList.add('hidden');
-      }, 300);
-    });
-  </script>
+  <div id="crosshair">+</div>
+  <span id="click-prompt">Klicke um die Maus zu sperren</span>
+
+  <div id="overlay">
+    <div id="overlay-title">STORAGE NIGHTMARE</div>
+    <div id="overlay-body">
+      <p>Sammle 4 Schlüsselkarten und finde den Ausgang.</p>
+      <p>Versteck dich in Lagern – Tür schließen, abschließen, warten.</p>
+      <p style="color:#ffcc00; margin-top: 8px">⚠ Enthält Jump Scares</p>
+      <p class="restart">[ Klicken oder Taste drücken um zu starten ]</p>
+    </div>
+  </div>
+
+  <script type="module" src="js/game.js"></script>
 </body>
 </html>

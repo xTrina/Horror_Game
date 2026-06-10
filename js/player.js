@@ -1,116 +1,217 @@
-// ============================================================
-//  PLAYER
-// ============================================================
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { CFG, TILE_TYPE as TT } from './config.js';
 
-class Player {
-  constructor(x, y) {
-    this.x = x;
-    this.y = y;
-    this.angle   = 0;
-    this.radius  = 14;
-    this.speed   = CFG.WALK_SPEED;
-    this.sprinting = false;
+const T  = CFG.TILE;
+const WH = CFG.WALL_H;
+
+export class Player {
+  constructor(camera, renderer, mapData) {
+    this.camera   = camera;
+    this.mapData  = mapData;
+    this.controls = new PointerLockControls(camera, renderer.domElement);
+
+    this.pos = new THREE.Vector3();
+    this.vel = new THREE.Vector2(); // XZ velocity
 
     // Inventory
-    this.keycards    = new Set();   // 'key_A' .. 'key_D'
-    this.hasSlat     = false;
-    this.nailCount   = 0;
-    this.hasWeapon   = false;       // slat + nails crafted
-    this.medicines   = 0;
-    this.noiseTraps  = 0;
+    this.keycards  = new Set();
+    this.hasSlat   = false;
+    this.nails     = 0;
+    this.hasWeapon = false;
+    this.medicines = 0;
+    this.traps     = 0;
 
-    // State
     this.hp          = 3;
+    this.noise       = 0;
     this.inStorage   = false;
-    this.currentStorage = null;
-    this.stunFrame   = 0;           // frames until weapon swing ends
-    this.hitCooldown = 0;
     this.dead        = false;
     this.escaped     = false;
-    this.noise       = 0;           // current noise level (0-10), decays
+    this.hitCooldown = 0;
+    this.swingFrame  = 0;
 
-    this.stepTimer   = 0;
-    this.moving      = false;
+    this.keys = {};
+    this._bindKeys();
   }
 
-  update(keys, map, monsters, audio) {
+  _bindKeys() {
+    window.addEventListener('keydown', e => { this.keys[e.code] = true; });
+    window.addEventListener('keyup',   e => { this.keys[e.code] = false; });
+  }
+
+  get tileCol() { return Math.floor(this.pos.x / T); }
+  get tileRow() { return Math.floor(this.pos.z / T); }
+  get keycardCount() { return this.keycards.size; }
+  get canEscape()    { return this.keycards.size >= CFG.KEYCARD_PIECES; }
+
+  setPosition(worldX, worldZ) {
+    this.pos.set(worldX, CFG.PLAYER_H, worldZ);
+    this.camera.position.copy(this.pos);
+  }
+
+  update(dt, audio) {
     if (this.dead || this.escaped) return;
+    if (this.swingFrame > 0) { this.swingFrame -= dt * 60; }
+    if (this.hitCooldown > 0) { this.hitCooldown -= dt; }
 
-    // Weapon swing
-    if (this.stunFrame > 0) { this.stunFrame--; return; }
-    if (this.hitCooldown > 0) this.hitCooldown--;
+    const sprinting = (this.keys['ShiftLeft'] || this.keys['ShiftRight']);
+    const spd = sprinting ? CFG.SPRINT_SPD : CFG.WALK_SPD;
 
-    let dx = 0, dy = 0;
-    if (keys['ArrowUp']    || keys['w'] || keys['W']) dy -= 1;
-    if (keys['ArrowDown']  || keys['s'] || keys['S']) dy += 1;
-    if (keys['ArrowLeft']  || keys['a'] || keys['A']) dx -= 1;
-    if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += 1;
+    // Movement input
+    const fwd  = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    this.camera.getWorldDirection(fwd);
+    fwd.y = 0; fwd.normalize();
+    right.crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
 
-    this.sprinting = (keys['Shift'] || keys['ShiftLeft'] || keys['ShiftRight']) && (dx || dy);
-    const spd = this.sprinting ? CFG.SPRINT_SPEED : CFG.WALK_SPEED;
+    let moveX = 0, moveZ = 0;
+    if (this.keys['KeyW'] || this.keys['ArrowUp'])    { moveX += fwd.x; moveZ += fwd.z; }
+    if (this.keys['KeyS'] || this.keys['ArrowDown'])  { moveX -= fwd.x; moveZ -= fwd.z; }
+    if (this.keys['KeyA'] || this.keys['ArrowLeft'])  { moveX -= right.x; moveZ -= right.z; }
+    if (this.keys['KeyD'] || this.keys['ArrowRight']) { moveX += right.x; moveZ += right.z; }
 
-    if (dx !== 0 || dy !== 0) {
-      const len = Math.hypot(dx, dy);
-      dx = dx / len * spd;
-      dy = dy / len * spd;
-      this.angle = Math.atan2(dy, dx);
-      this.moving = true;
+    const len = Math.hypot(moveX, moveZ);
+    if (len > 0) { moveX /= len; moveZ /= len; }
 
-      // Collision
-      const nx = this.x + dx;
-      const ny = this.y + dy;
-      if (map.isWalkable(Math.floor(nx / CFG.TILE), Math.floor(this.y / CFG.TILE))) this.x = nx;
-      if (map.isWalkable(Math.floor(this.x / CFG.TILE), Math.floor(ny / CFG.TILE))) this.y = ny;
+    const dx = moveX * spd * dt;
+    const dz = moveZ * spd * dt;
 
-      // Footstep noise
-      this.stepTimer++;
-      const stepInterval = this.sprinting ? 12 : 22;
-      if (this.stepTimer >= stepInterval) {
-        this.stepTimer = 0;
-        this.noise = this.sprinting ? 7 : 3;
-        audio.playStep(this.sprinting);
-      }
-    } else {
-      this.moving = false;
-      this.noise = Math.max(0, this.noise - 0.1);
-    }
+    // Resolve collisions on each axis separately
+    this._moveAxis('x', dx);
+    this._moveAxis('z', dz);
 
-    // Check storage
-    const tx = Math.floor(this.x / CFG.TILE);
-    const ty = Math.floor(this.y / CFG.TILE);
-    this.inStorage = map.isStorage(tx, ty);
-    this.currentStorage = this.inStorage ? map.getStorageAt(this.x, this.y) : null;
-
-    // Noise decay
-    this.noise = Math.max(0, this.noise - 0.05);
-  }
-
-  collectItems(storage) {
-    for (const item of storage.items) {
-      switch (item.type) {
-        case 'keycard':  this.keycards.add(item.id); break;
-        case CFG.SLAT_ID: this.hasSlat = true; break;
-        case CFG.NAIL_ID: this.nailCount++; break;
-        case 'medicine': this.medicines++; break;
-        case 'noise_trap': this.noiseTraps++; break;
+    // Footstep noise
+    if (len > 0) {
+      this._stepTimer = (this._stepTimer || 0) + dt;
+      const interval = sprinting ? 0.22 : 0.40;
+      if (this._stepTimer >= interval) {
+        this._stepTimer = 0;
+        this.noise = sprinting ? 7 : 3;
+        audio.playStep(sprinting);
       }
     }
-    storage.items = [];
+    this.noise = Math.max(0, this.noise - dt * 2);
+
+    // Storage check
+    this.inStorage = this.mapData.isStorage(this.tileCol, this.tileRow);
+
+    // Camera follows pos
+    this.camera.position.copy(this.pos);
   }
 
-  tryHeal() {
-    if (this.medicines > 0 && this.hp < 3) {
-      this.medicines--;
-      this.hp = Math.min(3, this.hp + 1);
+  _moveAxis(axis, delta) {
+    const map = this.mapData;
+    const newPos = this.pos.clone();
+    newPos[axis] += delta;
+
+    const r = 0.3; // player radius
+    const cx = newPos.x, cz = newPos.z;
+    const corners = [
+      { x: cx - r, z: cz - r }, { x: cx + r, z: cz - r },
+      { x: cx - r, z: cz + r }, { x: cx + r, z: cz + r },
+    ];
+
+    for (const c of corners) {
+      const tc = Math.floor(c.x / T);
+      const tr = Math.floor(c.z / T);
+      if (!map.isWalkable(tc, tr)) return; // blocked
+    }
+
+    // Check door collision
+    if (!this._canPassDoor(this.pos, newPos)) return;
+
+    this.pos[axis] = newPos[axis];
+  }
+
+  _canPassDoor(from, to) {
+    // Doors are z-axis barriers (N/S doors block z movement)
+    for (const door of this.mapData.doors) {
+      if (door.open) continue;
+      const dz = door.dir === 'S' ? (door.row + 1) * T : door.row * T;
+      const dx0 = door.col * T, dx1 = (door.col + 1) * T;
+
+      // Check if movement crosses this z-line within the door's x range
+      const playerX = (from.x + to.x) / 2;
+      if (playerX < dx0 - 0.1 || playerX > dx1 + 0.1) continue;
+
+      const crossesZ = (from.z < dz && to.z >= dz) || (from.z > dz && to.z <= dz);
+      if (crossesZ) return false;
+    }
+    return true;
+  }
+
+  tryInteract(audio, items, monsters) {
+    const px = this.pos.x, pz = this.pos.z;
+
+    // Items
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      const d = Math.hypot(px - item.worldX, pz - item.worldZ);
+      if (d < CFG.INTERACT_R) {
+        this._pickUp(item, audio);
+        items.splice(i, 1);
+        return { action: 'pickup', item };
+      }
+    }
+
+    // Doors
+    const nearDoor = this._nearestDoor(px, pz);
+    if (nearDoor) {
+      if (this.inStorage && !nearDoor.open) {
+        // Lock/unlock
+        nearDoor.locked = !nearDoor.locked;
+        audio.playDoor();
+        return { action: nearDoor.locked ? 'locked' : 'unlocked' };
+      } else if (!nearDoor.locked) {
+        nearDoor.open = !nearDoor.open;
+        audio.playDoor();
+        return { action: nearDoor.open ? 'open' : 'close' };
+      } else {
+        return { action: 'locked_hint' };
+      }
+    }
+    return null;
+  }
+
+  _nearestDoor(px, pz) {
+    let best = null, bd = CFG.INTERACT_R;
+    for (const d of this.mapData.doors) {
+      const doorX = (d.col + 0.5) * T;
+      const doorZ = d.dir === 'S' ? (d.row + 1) * T : d.row * T;
+      const dist  = Math.hypot(px - doorX, pz - doorZ);
+      if (dist < bd) { bd = dist; best = d; }
+    }
+    return best;
+  }
+
+  _pickUp(item, audio) {
+    audio.playPickup(item.type);
+    switch (item.type) {
+      case 'keycard':    this.keycards.add(item.id); break;
+      case 'slat':       this.hasSlat = true; break;
+      case 'nail':       this.nails++; break;
+      case 'medicine':   this.medicines++; break;
+      case 'noise_trap': this.traps++; break;
+    }
+    if (item.mesh) item.mesh.parent?.remove(item.mesh);
+  }
+
+  tryCraft(audio) {
+    if (this.hasSlat && this.nails >= 2 && !this.hasWeapon) {
+      this.nails -= 2;
+      this.hasWeapon = true;
+      this.noise = 8;
+      audio.playCraft();
       return true;
     }
     return false;
   }
 
-  tryCraft() {
-    if (this.hasSlat && this.nailCount >= 2 && !this.hasWeapon) {
-      this.nailCount -= 2;
-      this.hasWeapon = true;
+  tryHeal(audio) {
+    if (this.medicines > 0 && this.hp < 3) {
+      this.medicines--;
+      this.hp = Math.min(3, this.hp + 1);
+      audio.playPickup('medicine');
       return true;
     }
     return false;
@@ -118,34 +219,29 @@ class Player {
 
   tryAttack(monsters, audio) {
     if (!this.hasWeapon || this.hitCooldown > 0) return false;
-    this.stunFrame = 20;
-    this.hitCooldown = 45;
+    this.swingFrame  = 20;
+    this.hitCooldown = 0.75;
     audio.playSwing();
+    let hit = false;
     for (const m of monsters) {
-      const dist = Math.hypot(this.x - m.x, this.y - m.y);
-      if (dist < CFG.TILE * 1.5) {
-        m.stun(CFG.STUN_DURATION);
-        audio.playHit();
-      }
+      const d = Math.hypot(this.pos.x - m.pos.x, this.pos.z - m.pos.z);
+      if (d < T * 1.5) { m.stun(CFG.STUN_DUR); audio.playHit(); hit = true; }
     }
-    return true;
+    return hit;
   }
 
-  placeNoiseTrap(map, audio) {
-    if (this.noiseTraps <= 0) return null;
-    this.noiseTraps--;
+  placeTrap(audio) {
+    if (this.traps <= 0) return null;
+    this.traps--;
     audio.playDrop();
-    return { x: this.x, y: this.y, triggered: false, life: 600 };
+    return { x: this.pos.x, z: this.pos.z, triggered: false, life: 600 };
   }
 
   takeDamage(audio) {
     if (this.hitCooldown > 0) return;
     this.hp--;
-    this.hitCooldown = 120;
+    this.hitCooldown = 2.0;
     audio.playScream();
     if (this.hp <= 0) this.dead = true;
   }
-
-  get keycardCount() { return this.keycards.size; }
-  get canEscape() { return this.keycards.size >= CFG.KEYCARD_PIECES; }
 }
